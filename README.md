@@ -10,7 +10,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-Skill-green)](https://docs.openclaw.ai)
-[![Version](https://img.shields.io/badge/Version-v1.14-orange)](SKILL.md)
+[![Version](https://img.shields.io/badge/Version-v1.16-orange)](SKILL.md)
+[![GitHub](https://img.shields.io/badge/GitHub-repo-blue)](https://github.com/jinliangliu/freshwater-fishing)
 
 </div>
 
@@ -206,6 +207,8 @@
 
 ## 📝 版本历史
 
+- **v1.16** (2026-05-29): 新增禁钓政策查询机制（强制检查，长江十年禁渔等重点水域）
+- **v1.15** (2026-05-29): 新增保护鱼种核对机制（国家一/二级保护鱼种强制否决）
 - **v1.14** (2026-05-29): 新增天气 - 鱼情对应关系表
 - **v1.13** (2026-05-29): 新增通用钓位（树荫下、桥墩旁、坝口）
 - **v1.12** (2026-05-29): 修正季节划分为农历标准
@@ -254,6 +257,6 @@
 
 **祝你好运，大鲫大鲤！** 🎣
 
-Made with ❤️ by 瓦旦 (Dylan)
+Made with ❤️ by Jinliang Liu (jinliang.liu@outlook.com)
 
 </div>
