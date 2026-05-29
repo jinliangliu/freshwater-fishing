@@ -1,0 +1,25 @@
+# 忽略临时文件和备份
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+
+# 忽略编辑器特定文件
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 忽略系统文件
+.DS_Store
+Thumbs.db
+
+# 忽略日志和缓存
+*.log
+cache/
+temp/
+
+# 忽略测试数据
+test-data/
+fixtures/
