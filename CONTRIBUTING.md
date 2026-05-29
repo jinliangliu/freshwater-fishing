@@ -74,7 +74,7 @@
 
 ## 📞 联系方式
 
-- 作者：瓦旦 (Dylan)
+- 作者：jinliang.liu@outlook.com
 - GitHub Issues: 提交问题或建议
 - 讨论区：欢迎参与讨论
 
