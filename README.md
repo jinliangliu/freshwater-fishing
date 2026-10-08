@@ -23,13 +23,9 @@ WorkBuddy 技能 —— 依据真实气象、天文与法规数据，给出可�
 
 ## 安装
 
-### 方式一：技能市场安装（推荐）
+### 方式一：本地安装（当前可用）
 
-在 WorkBuddy 的「技能」页面搜索 **淡水野钓顾问** 安装。
-
-### 方式二：本地安装
-
-将本目录放入用户级技能目录，重启 WorkBuddy 后生效：
+将 `dist/freshwater-fishing.zip` 解压后，把 `freshwater-fishing` 目录放入用户级技能目录，重启 WorkBuddy 后生效：
 
 ```bash
 # Windows
@@ -40,6 +36,12 @@ cp -r freshwater-fishing ~/.workbuddy/skills/
 ```
 
 如需团队共用，放入项目级目录 `.workbuddy/skills/` 并提交到仓库。
+
+### 方式二：技能市场安装
+
+在 WorkBuddy 的「技能」页面搜索 **淡水野钓顾问** 安装。
+
+> 本技能已完成上架前的全部技术准备（frontmatter 字段齐全、`package_skill.py` 校验通过、512×512 图标、ZIP 包已就绪），但**尚未提交审核**，目前市场还搜不到。提交入口在 WorkBuddy 客户端的技能管理页「发布到 SkillHub」，需先完成开发者注册；官方审核约 1-3 个工作日。上架前的提交材料见仓库 `dist/上架提交材料.md`。
 
 ### 环境要求
 
