@@ -1,11 +1,11 @@
 ---
 name: freshwater-fishing
-version: "2.1.1"
+version: "2.2.0"
 display_name: "淡水野钓顾问"
 display_name_en: "Freshwater Fishing Advisor"
-description: "淡水野钓出钓决策顾问，覆盖台钓、传统钓、筏钓三种作钓方式与江河、湖泊、城市河道、黑坑、水库、闸口、山涧、溪流、鱼塘等水域类型。当用户询问「某地或某水域某天适不适合钓鱼」「适合钓什么鱼」「怎么配线组饵料」「白天还是夜钓好」，或提到淡水钓、野钓、台钓、传统钓、筏钓、水库钓鱼、黑坑、翘嘴、鲫鱼、鲤鱼等关键字时使用。必须先调用 scripts/fishing_conditions.py 获取真实天气与天文数据，并先做保护物种与禁渔区法规否决检查；不得凭训练记忆编造天气、月相或保护名录。"
-description_zh: "依据真实气象、天文与法规数据，为淡水野钓给出带适宜度评分、分时段窗口、线组饵料与钓位建议的可执行方案。支持台钓/传统钓/筏钓三种作钓方式与 9 类水域，内置农历月相推算、长江流域保护物种否决与禁渔区核查。零依赖脚本采集天气数据，不依赖模型记忆。"
-description_en: "Freshwater fishing decision advisor for China. Delivers actionable plans with suitability scores, day/night windows, tackle and rig setups, and swim recommendations, based on real weather, astronomical and regulatory data. Supports three fishing methods and nine water types, with built-in lunar moon-phase calculation, Yangtze-basin protected-species veto, and closed-season screening. Uses a zero-dependency script for weather data instead of model recall."
+description: "淡水野钓出钓决策顾问，覆盖台钓、传统钓、筏钓三种作钓方式与江河、湖泊、城市河道、黑坑、水库、闸口、山涧、溪流、鱼塘等水域类型。当用户询问「某地或某水域某天适不适合钓鱼」「适合钓什么鱼」「怎么配线组饵料」「白天还是夜钓好」，或提到淡水钓、野钓、台钓、传统钓、筏钓、水库钓鱼、黑坑、翘嘴、鲫鱼、鲤鱼等关键字时使用；也用于对已发生的出钓做天气归因复盘（如「昨晚为什么全是小鲫鱼」「昨晚口不好是什么原因」）。必须先调用 scripts/fishing_conditions.py 获取真实天气与天文数据，并先做保护物种与禁渔区法规否决检查；历史时段同样要取真实历史气象，不得凭训练记忆编造天气、月相或保护名录。"
+description_zh: "依据真实气象、天文与法规数据，为淡水野钓给出带适宜度评分、分时段窗口、线组饵料与钓位建议的可执行方案。支持台钓/传统钓/筏钓三种作钓方式与 9 类水域，内置农历月相推算、长江流域保护物种否决与禁渔区核查。零依赖脚本采集天气，同时覆盖未来 16 天预报与过去 92 天历史回溯，可对已发生的出钓做天气归因复盘，不依赖模型记忆。"
+description_en: "Freshwater fishing decision advisor for China. Delivers actionable plans with suitability scores, day/night windows, tackle and rig setups, and swim recommendations, based on real weather, astronomical and regulatory data. Supports three fishing methods and nine water types, with built-in lunar moon-phase calculation, Yangtze-basin protected-species veto, and closed-season screening. A zero-dependency script supplies both a 16-day forecast and a 92-day historical backfill, so past sessions can be analysed by weather without relying on model recall."
 agent_created: true
 metadata:
   author: jinliangliu
@@ -33,7 +33,7 @@ metadata:
 ### 第 1 步：采集环境数据（必做）
 
 ```bash
-python scripts/fishing_conditions.py --location "<地点>" --date "<日期>" [--water-type "<水域类型>"]
+python scripts/fishing_conditions.py --location "<地点>" --date "<日期>" [--water-type "<水域类型>"] [--past-days N]
 ```
 
 参数说明：
@@ -43,17 +43,30 @@ python scripts/fishing_conditions.py --location "<地点>" --date "<日期>" [--
 | `--location` / `-l` | **必填**。地点或水域名，如「千岛湖」「上海青浦」「长江南京段」 |
 | `--date` / `-d` | 目标日期。支持 `今天` `明天` `后天` `2026-06-01` `06-01`。缺省为明天 |
 | `--water-type` / `-w` | 水域类型，用于禁渔关键词预筛，如「水库」「长江」 |
-| `--days` / `-n` | 输出预报天数，默认 3（wttr.in 上限） |
+| `--days` / `-n` | 输出天数，默认 3 |
+| `--past-days` | 额外向前回溯的天数，用于看气压/气温**趋势**。复盘时设 3 |
+| `--source` / `-s` | 数据源：`auto`（默认）/ `wttr` / `open-meteo` |
 | `--no-network` | 跳过网络请求，仅输出农历/月相/季节/禁钓预筛 |
+
+**数据源与覆盖范围**（`--source auto` 时按目标日期自动选择）：
+
+| 数据源 | 覆盖范围 | 说明 |
+|---|---|---|
+| wttr.in | 未来 3 天 | 附带月出/月落/月相，可做月相交叉校验 |
+| Open-Meteo | **过去 92 天 ~ 未来 16 天** | 近实时分析场 + ERA5 再分析，字段与 wttr 路径一致 |
+
+自动选择规则：**过去日期 → Open-Meteo**（wttr 无法回溯）；未来 0–2 天 → wttr；未来 3 天以上 → Open-Meteo。
+若用 `--source wttr` 强制指定而日期不在其范围内，脚本会在 `warnings` 中说明并给出空天气结果。
 
 脚本输出 JSON，包含：
 
 - `lunar` / `moon` —— 农历日期、月相、照度、夜钓与昼钓修正
 - `season` —— 季节（节气法）
-- `weather.current` 与 `weather.forecast_days[].hourly` —— 逐 3 小时的气温、气压、湿度、风力（含蒲福风级）、云量、降水、雷暴概率
-- `weather.forecast_days[].sunrise` / `sunset` / `moonrise` / `moonset`
+- `weather.source` —— **实际使用的数据源，向用户交代数据来源时用它**
+- `weather.current` 与 `weather.forecast_days[].hourly` —— 气温、气压（含海平面气压）、湿度、风力（含蒲福风级）、风向、云量、降水、天气现象
+- `weather.forecast_days[].sunrise` / `sunset`（24 小时制）以及 wttr 路径的 `moonrise` / `moonset`
 - `ban_screening` —— 禁渔区关键词预筛结果
-- `safety_preflags` —— 脚本直接标出的否决项（≥6 级风、雷暴概率 ≥40%）
+- `safety_preflags` —— 脚本直接标出的否决项（≥6 级风、雷暴）
 - `warnings` —— 数据缺失或降级说明，**必须向用户转述**
 
 **「周六」这类相对星期**：脚本不解析，先自行换算成具体日期（用 `date` 命令确认当天日期）再传入。
@@ -62,7 +75,24 @@ python scripts/fishing_conditions.py --location "<地点>" --date "<日期>" [--
 
 **天气获取失败**：不要向用户索要全量气象数据。改为请用户描述「所在地 + 当前天气 + 气温 + 风力」，据此降级评估，并在输出中说明数据来源为用户描述。
 
-**目标日期超过 3 天**：脚本会在 `warnings` 中说明超出预报范围。此时用气候平均 + 用户描述给出粗略判断，并明确标注置信度低。
+**目标日期超出 16 天**：脚本会在 `warnings` 中说明。此时用气候平均 + 用户描述给出粗略判断，并明确标注置信度低。
+
+### 第 1b 步：复盘已发生的出钓（用户说「昨晚」「昨天」时）
+
+用户问「昨晚为什么全是小鲫鱼」这类**事后归因**时：
+
+1. 把相对时间换算成具体日期（「昨晚」= 今天减 1 天，先用 `date` 命令确认当天日期）。
+2. **必须先确认钓点**。历史气象按地点取值，地点错则结论全错。用户未讲清时先问，不得默认。
+3. 调脚本取该日真实气象并附带趋势：
+   ```bash
+   python scripts/fishing_conditions.py --location "<钓点>" --date "<昨晚日期>" --days 1 --past-days 3
+   ```
+   重点看目标日**逐小时**数据，以及前几日的**气压变化率**（骤降/骤升）与**降温幅度**。
+4. 分析时必须区分两类因素，不得混为一谈：
+   - **天气因素** —— 气压绝对值与变化率、气温与降温过程、降水、风力、云量、月相与月光强度。
+   - **非天气因素**（往往才是主因）—— 目标鱼的种群结构与个体大小分布、饵料雾化与味型、窝料形态、钓位深浅、光照与人为干扰。
+   典型误区：把「全是小鱼」直接归因于天气。天气多决定**整体活性**，个体大小更多由**种群与钓法**决定。
+5. 光源分析要点：月相必须结合**月出时刻**判断，不能只看照度百分比。残月（廿五–廿九）与蛾眉月（初三–初六）月出于凌晨或日落前，**前半夜实际无月光**。
 
 ### 第 2 步：否决检查（必做，先于评分）
 
@@ -160,6 +190,7 @@ python scripts/fishing_conditions.py --location "<地点>" --date "<日期>" [--
 
 ## 版本
 
+- **v2.2.0** —— 新增 **Open-Meteo 数据源**，脚本支持**历史回溯**（过去 92 天）与 **16 天预报**，补齐 wttr.in 只能看未来 3 天的能力缺口；新增 `--source` 与 `--past-days` 参数，`auto` 按目标日期自动选源（过去日期走 Open-Meteo 的 near-real-time 分析场，更早走 ERA5 归档）；新增「第 1b 步：复盘已发生的出钓」流程与相关方法论。同时统一时间格式为 24 小时制、统一两数据源的 JSON 字段结构。
 - **v2.1.1** —— `鳡`（*Elopichthys bambusa*）明确定性为**非国家保护鱼类**，从 §1.3「需核实」类移入新增的 §1.4「明确非保护种」。原技能将其列为二级严禁捕捞属错误条目。同时澄清《国家重点保护野生动物名录》（保护）与《国家重点保护经济水生动植物资源名录》（经济资源）是两份不同名录，鳡属后者。
 - **v2.1.0** —— 保护清单改为分层结构：正文层只列**长江流域常见种**（一级 5 条 / 二级 7 条），长江外物种收进简表；新增 §1.3「疑似保护 / 需核实」类与 §4「不确定处理流程」，把无法确证的物种从「严禁捕捞」改为「需核实」，避免错误断言。按官方口径更正保护级别：大鲵、川陕哲罗鲑、花鳗鲡为**二级**（此前误改一级）。补注十年禁渔的起止（2021-01-01 起十年）。删除「白云山鱼」错误条目。
 - **v2.0.0** —— 重构为 WorkBuddy 技能规范：天气/农历/月相改由脚本确定性获取，SKILL.md 精简、细节拆入 `references/`；修正季节划分矛盾、评分权重不合计、分数可超 100 等内部矛盾。

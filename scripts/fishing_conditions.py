@@ -10,10 +10,16 @@
 - 缺数据就显式置 null 并写进 warnings，绝不编造（原技能靠模型心算，会静默幻觉）。
 - 不做"适宜度打分"——评分涉及大量领域判断，留给模型；脚本只提供事实。
 
+数据源（--source auto 时按目标日期自动选择）：
+- wttr.in      —— 未来 3 天，附带月出/月落/月相
+- Open-Meteo   —— 过去 92 天 ~ 未来 16 天，history 与 forecast 同一 schema
+  过去日期必须走 Open-Meteo，wttr.in 无法回溯。
+
 用法：
     python fishing_conditions.py --location 千岛湖 --date 2026-06-01
-    python fishing_conditions.py --location "上海青浦" --days 3 --json
-    python fishing_conditions.py --location 太湖 --date 明天 --no-network   # 仅算天文/季节
+    python fishing_conditions.py --location "上海青浦" --days 3
+    python fishing_conditions.py --location 上海 --date 2026-10-08 --past-days 3   # 复盘昨晚
+    python fishing_conditions.py --location 太湖 --date 明天 --no-network          # 仅算天文/季节
 """
 
 from __future__ import annotations
@@ -227,6 +233,62 @@ _WWO_ZH = {
 }
 
 
+# Open-Meteo / WMO 天气代码 → 中文描述
+_WMO_ZH = {
+    0: "晴", 1: "少云", 2: "局部多云", 3: "阴",
+    45: "雾", 48: "冻雾",
+    51: "小毛毛雨", 53: "中毛毛雨", 55: "强毛毛雨",
+    56: "冻毛毛雨", 57: "强冻毛毛雨",
+    61: "小雨", 63: "中雨", 65: "大雨",
+    66: "冻雨", 67: "强冻雨",
+    71: "小雪", 73: "中雪", 75: "大雪", 77: "雪粒",
+    80: "小阵雨", 81: "中阵雨", 82: "强阵雨",
+    85: "小阵雪", 86: "大阵雪",
+    95: "雷阵雨", 96: "雷阵雨伴冰雹", 99: "强雷阵雨伴冰雹",
+}
+
+# WMO 代码中 ≥95 即雷暴
+_WMO_THUNDER = {95, 96, 99}
+
+_WIND_DIR_16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+
+def _at(seq, i):
+    """安全取下标，越界或类型不符返回 None。"""
+    try:
+        return seq[i]
+    except (IndexError, TypeError, KeyError):
+        return None
+
+
+def _deg_to_dir(deg) -> str:
+    """风向角度 → 16 方位。"""
+    if deg is None:
+        return ""
+    try:
+        d = float(deg) % 360
+    except (TypeError, ValueError):
+        return ""
+    return _WIND_DIR_16[int((d + 11.25) // 22.5) % 16]
+
+
+def _norm_time(v) -> str | None:
+    """把 wttr 的 '05:53 AM' 归一成 24 小时 'HH:MM'，与 Open-Meteo 路径一致。"""
+    if not v:
+        return None
+    s = str(v).strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$", s)
+    if not m:
+        return s
+    h, mi, ap = int(m.group(1)), m.group(2), m.group(3).upper()
+    if ap == "PM" and h != 12:
+        h += 12
+    elif ap == "AM" and h == 12:
+        h = 0
+    return f"{h:02d}:{mi}"
+
+
 def _wind_force(kmph: float) -> int:
     """km/h → 蒲福风级。"""
     thresholds = [1, 6, 12, 20, 29, 39, 50, 62, 75, 89, 103, 118]
@@ -269,10 +331,10 @@ def _parse_wttr_day(day: dict) -> dict:
         "date": day.get("date"),
         "temp_min_c": _num(day.get("mintempC")),
         "temp_max_c": _num(day.get("maxtempC")),
-        "sunrise": astro.get("sunrise"),
-        "sunset": astro.get("sunset"),
-        "moonrise": astro.get("moonrise"),
-        "moonset": astro.get("moonset"),
+        "sunrise": _norm_time(astro.get("sunrise")),
+        "sunset": _norm_time(astro.get("sunset")),
+        "moonrise": _norm_time(astro.get("moonrise")),
+        "moonset": _norm_time(astro.get("moonset")),
         "moon_phase_wttr": astro.get("moon_phase"),
         "moon_illumination_wttr": _num(astro.get("moon_illumination")),
         "hourly": hours,
@@ -308,6 +370,7 @@ def fetch_weather(location: str, timeout: int = 20) -> dict:
 
     return {
         "ok": True,
+        "source": "wttr.in (World Weather Online)",
         "query": location,
         "resolved": resolved,
         "url": url,
@@ -333,6 +396,149 @@ def _parse_current(cur_list) -> dict:
         "cloud_cover_pct": _num(c.get("cloudcover")),
         "precip_mm": _num(c.get("precipMM")),
         "condition": _WWO_ZH.get(str(c.get("weatherCode", "")), None),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 天气（Open-Meteo，无 API Key；支持历史回溯与最长 16 天预报）
+#
+# wttr.in 只能给未来 3 天，无法回溯「昨晚」这类过去时段。
+# Open-Meteo 补齐这一能力：过去 92 天 ~ 未来 16 天，schema 与 wttr 路径统一。
+# ---------------------------------------------------------------------------
+
+_OM_GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+_OM_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_OM_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+# 两套接口都支持的逐小时变量
+_OM_HOURLY = [
+    "temperature_2m", "relative_humidity_2m", "surface_pressure",
+    "pressure_msl", "wind_speed_10m", "wind_direction_10m",
+    "precipitation", "cloud_cover", "weather_code",
+]
+# 预报接口额外提供，归档接口没有
+_OM_HOURLY_EXTRA = ["apparent_temperature", "precipitation_probability"]
+_OM_DAILY = ["sunrise", "sunset", "temperature_2m_max", "temperature_2m_min"]
+
+_OM_PAST_LIMIT = 92     # past_days 上限
+_OM_FUTURE_LIMIT = 16   # forecast_days 上限
+_OM_ANALYSIS_BACK = 5   # 近实时分析场可回溯天数；更早的日期走 ERA5 归档
+
+
+def geocode_openmeteo(location: str, timeout: int = 20):
+    """地名 → (lat, lon, resolved_name)。解析失败返回 None。"""
+    url = _OM_GEO_URL + "?" + urllib.parse.urlencode(
+        {"name": location, "count": 1, "language": "zh", "format": "json"})
+    try:
+        data = _fetch_json(url, timeout=timeout)
+    except Exception:
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    r = results[0]
+    parts = [p for p in (r.get("country"), r.get("admin1"), r.get("name")) if p]
+    return r.get("latitude"), r.get("longitude"), " / ".join(parts)
+
+
+def _om_hour_record(hourly, i, has_extra):
+    """把 Open-Meteo 的第 i 小时转成与 wttr 路径一致的记录结构。"""
+    wind_kmph = _num(_at(hourly.get("wind_speed_10m"), i)) or 0
+    code = _at(hourly.get("weather_code"), i)
+    return {
+        "time": ((_at(hourly.get("time"), i) or "T")[-5:]) or "??:??",
+        "temp_c": _num(_at(hourly.get("temperature_2m"), i)),
+        "feels_like_c": _num(_at(hourly.get("apparent_temperature"), i)) if has_extra else None,
+        "humidity_pct": _num(_at(hourly.get("relative_humidity_2m"), i)),
+        "pressure_hpa": _num(_at(hourly.get("surface_pressure"), i)),
+        "pressure_msl_hpa": _num(_at(hourly.get("pressure_msl"), i)),
+        "wind_kmph": wind_kmph,
+        "wind_force": _wind_force(wind_kmph),
+        "wind_dir": _deg_to_dir(_at(hourly.get("wind_direction_10m"), i)),
+        "cloud_cover_pct": _num(_at(hourly.get("cloud_cover"), i)),
+        "precip_mm": _num(_at(hourly.get("precipitation"), i)),
+        "rain_chance_pct": _num(_at(hourly.get("precipitation_probability"), i)) if has_extra else None,
+        # WMO 码 ≥95 即雷暴，折算成概率供安全预筛统一处理
+        "thunder_chance_pct": 80 if code in _WMO_THUNDER else 0,
+        "condition": _WMO_ZH.get(code),
+    }
+
+
+def parse_weather_openmeteo(location, target, today, past_days=0, days=3, timeout=25) -> dict:
+    """拉取 Open-Meteo 并转成与 wttr 路径一致的结构。
+
+    接口自动选择：
+    - 未来日期 → forecast 接口
+    - 过去 ≤ _OM_ANALYSIS_BACK 天 → forecast 接口的 past_days（近实时分析场）
+    - 过去更久 → archive 接口（ERA5 再分析）
+    """
+    geo = geocode_openmeteo(location, timeout=timeout)
+    if not geo:
+        return {"ok": False, "error": f"Open-Meteo 地理编码失败：无法解析地点「{location}」", "days": []}
+    lat, lon, resolved = geo
+
+    delta = (target - today).days
+    span_end = max(target + _dt.timedelta(days=max(days - 1, 0)), today)
+    span_start = target - _dt.timedelta(days=max(past_days, 1 if delta < 0 else 0))
+
+    if delta >= 0:
+        endpoint = _OM_FORECAST_URL
+        params_extra = {"past_days": 0,
+                        "forecast_days": min((span_end - today).days + 1, _OM_FUTURE_LIMIT)}
+    elif abs(delta) <= _OM_ANALYSIS_BACK:
+        endpoint = _OM_FORECAST_URL
+        params_extra = {"past_days": min(max((today - span_start).days, 1), _OM_PAST_LIMIT),
+                        "forecast_days": min(max((span_end - today).days + 1, 1), _OM_FUTURE_LIMIT)}
+    else:
+        endpoint = _OM_ARCHIVE_URL
+        params_extra = {"start_date": span_start.isoformat(), "end_date": span_end.isoformat()}
+
+    has_extra = endpoint == _OM_FORECAST_URL
+    hourly_vars = list(_OM_HOURLY) + (list(_OM_HOURLY_EXTRA) if has_extra else [])
+
+    params = {"latitude": lat, "longitude": lon,
+              "hourly": ",".join(hourly_vars),
+              "daily": ",".join(_OM_DAILY),
+              "timezone": "Asia/Shanghai"}
+    params.update(params_extra)
+
+    url = endpoint + "?" + urllib.parse.urlencode(params, safe=",")
+    try:
+        data = _fetch_json(url, timeout=timeout)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "url": url, "days": []}
+
+    hourly = data.get("hourly") or {}
+    daily = data.get("daily") or {}
+
+    by_date = {}
+    for i, t in enumerate(hourly.get("time") or []):
+        by_date.setdefault(str(t)[:10], []).append(_om_hour_record(hourly, i, has_extra))
+
+    day_list = []
+    for di, d in enumerate(daily.get("time") or []):
+        day_list.append({
+            "date": str(d)[:10],
+            "temp_min_c": _num(_at(daily.get("temperature_2m_min"), di)),
+            "temp_max_c": _num(_at(daily.get("temperature_2m_max"), di)),
+            "sunrise": ((_at(daily.get("sunrise"), di) or "")[-5:]) or None,
+            "sunset": ((_at(daily.get("sunset"), di) or "")[-5:]) or None,
+            # Open-Meteo 不提供月出月落；月相由本地农历推算，wttr 路径才做交叉校验
+            "moonrise": None, "moonset": None,
+            "moon_phase_wttr": None, "moon_illumination_wttr": None,
+            "hourly": by_date.get(str(d)[:10], []),
+        })
+
+    return {
+        "ok": True,
+        "source": "Open-Meteo" + (" (ERA5 再分析)" if endpoint == _OM_ARCHIVE_URL else " (分析场 + 预报)"),
+        "query": location,
+        "resolved": resolved,
+        "url": url,
+        "endpoint": endpoint,
+        "current": {},
+        "days": day_list,
+        "span": [span_start.isoformat(), span_end.isoformat()],
     }
 
 
@@ -397,8 +603,25 @@ def parse_date(raw: str | None, today: _dt.date | None = None) -> _dt.date:
     )
 
 
+def _select_source(source: str, target_date: _dt.date, today: _dt.date) -> str:
+    """决定天气数据源。
+
+    auto：过去日期 → open-meteo（wttr 无回溯能力）；未来 0-2 天 → wttr（保留月出月落）；
+    未来 3 天以上 → open-meteo（支持到 16 天）。
+    """
+    if source != "auto":
+        return source
+    delta = (target_date - today).days
+    if delta < 0:
+        return "open-meteo"
+    if delta <= 2:
+        return "wttr"
+    return "open-meteo"
+
+
 def build_report(location: str, date_str: str | None, days: int = 3,
-                 water_type: str | None = None, offline: bool = False) -> dict:
+                 water_type: str | None = None, offline: bool = False,
+                 source: str = "auto", past_days: int = 0) -> dict:
     today = _dt.date.today()
     target = parse_date(date_str, today)
     warnings: list[str] = []
@@ -422,50 +645,71 @@ def build_report(location: str, date_str: str | None, days: int = 3,
     }
 
     if offline:
-        warnings.append("已指定 --no-network，未获取天气数据。请要求用户提供气温/气压/风力/降水。")
+        warnings.append("已指定 --no-network，未获取天气数据。仅输出天文/季节/法规预筛。")
         return report
 
-    wx = fetch_weather(location)
+    delta = (target - today).days
+    chosen = _select_source(source, target, today)
+    report["weather_source"] = chosen
+
+    if chosen == "open-meteo":
+        wx = parse_weather_openmeteo(location, target, today, past_days=past_days, days=days)
+    else:
+        if delta < 0:
+            warnings.append(
+                f"wttr.in 只提供未来 3 天，无法回溯 {target.isoformat()}，本次将无天气数据；"
+                "建议改用 --source open-meteo。")
+        elif delta > 2:
+            warnings.append(
+                f"wttr.in 只提供未来 3 天，{target.isoformat()}（+{delta} 天）超出范围；"
+                "建议改用 --source open-meteo（可到 16 天）。")
+        wx = fetch_weather(location)
+
     if not wx["ok"]:
         warnings.append(
-            f"天气数据获取失败（{wx['error']}）。已降级："
+            f"天气数据获取失败（{wx.get('error')}）。已降级："
             "不再向用户索要全量气象数据，改为要求用户描述「所在地 + 天气 + 气温 + 风力」后继续评估。"
         )
-        report["weather"] = {"ok": False, "error": wx["error"], "url": wx["url"]}
+        report["weather"] = {"ok": False, "error": wx.get("error"), "url": wx.get("url")}
         return report
 
     report["location_resolved"] = wx["resolved"]
     if not wx["resolved"] or wx["resolved"] == location:
         warnings.append(f"地点「{location}」可能未被精确解析，请向用户确认到「市/区/县」级别。")
 
-    # 挑出目标日期及其后 days-1 天
-    day_map = {d["date"]: d for d in wx["days"]}
+    # 输出区间：目标日 + 其后 days-1 天；若指定 past_days 再向前扩展（趋势分析用）
     target_key = target.isoformat()
-    forecast_days = [d for d in wx["days"] if d["date"] and d["date"] >= target_key][:days]
+    lo = (target - _dt.timedelta(days=past_days)).isoformat()
+    hi = (target + _dt.timedelta(days=max(days - 1, 0))).isoformat()
+    forecast_days = sorted(
+        (d for d in wx["days"] if d.get("date") and lo <= d["date"] <= hi),
+        key=lambda d: d["date"],
+    )
 
-    if not forecast_days:
+    if not any(d["date"] == target_key for d in forecast_days):
         warnings.append(
-            f"wttr.in 仅提供未来 3 天预报，目标日期 {target_key} 超出预报范围。"
-            "请改用气候平均值 + 用户描述，或改问近 3 天内的日期。"
-        )
+            f"未取到目标日期 {target_key} 的天气数据；"
+            f"数据源实际覆盖 {[d.get('date') for d in wx['days']]}。")
 
     report["weather"] = {
         "ok": True,
-        "source": "wttr.in (World Weather Online)",
-        "resolved": wx["resolved"],
-        "current": wx["current"],
+        "source": wx.get("source", "wttr.in (World Weather Online)"),
+        "resolved": wx.get("resolved"),
+        "current": wx.get("current") or {},
         "forecast_days": forecast_days,
-        "forecast_coverage": [d["date"] for d in wx["days"]],
+        "forecast_coverage": [d.get("date") for d in wx["days"]],
     }
 
-    # 交叉校验：wttr 自带月相 vs 本地农历推算
-    if forecast_days:
-        w_illum = forecast_days[0].get("moon_illumination_wttr")
-        if isinstance(w_illum, (int, float)) and abs(w_illum - phase["illumination_pct"]) > 25:
-            warnings.append(
-                f"月相交叉校验不一致：本地农历推算照度 {phase['illumination_pct']}%，"
-                f"wttr.in 给出 {w_illum}%。两者取一使用，并在输出中说明来源。"
-            )
+    # 交叉校验：wttr 自带月相 vs 本地农历推算（仅 wttr 路径提供该字段）
+    w_illum = None
+    for d in forecast_days:
+        if d.get("date") == target_key and isinstance(d.get("moon_illumination_wttr"), (int, float)):
+            w_illum = d["moon_illumination_wttr"]
+            break
+    if isinstance(w_illum, (int, float)) and abs(w_illum - phase["illumination_pct"]) > 25:
+        warnings.append(
+            f"月相交叉校验不一致：本地农历推算照度 {phase['illumination_pct']}%，"
+            f"wttr.in 给出 {w_illum}%。两者取一使用，并在输出中说明来源。")
 
     # 安全预扫描：直接给出确定性否决项，避免模型漏判
     flags = []
@@ -474,7 +718,7 @@ def build_report(location: str, date_str: str | None, days: int = 3,
             if (h.get("wind_force") or 0) >= 6:
                 flags.append(f"{d['date']} {h['time']} 风力达 {h['wind_force']} 级（≥6 级，安全否决）")
             if (h.get("thunder_chance_pct") or 0) >= 40:
-                flags.append(f"{d['date']} {h['time']} 雷暴概率 {h['thunder_chance_pct']}%（强对流风险）")
+                flags.append(f"{d['date']} {h['time']} 雷暴风险（{h.get('condition') or '雷暴'}）")
     report["safety_preflags"] = flags[:12]
 
     return report
@@ -484,14 +728,19 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="淡水野钓环境数据采集器")
     ap.add_argument("--location", "-l", required=True, help="地点/水域名称，如 千岛湖")
     ap.add_argument("--date", "-d", default=None, help="目标日期：今天/明天/后天/YYYY-MM-DD/MM-DD")
-    ap.add_argument("--days", "-n", type=int, default=3, help="输出预报天数，默认 3（wttr.in 上限）")
+    ap.add_argument("--days", "-n", type=int, default=3, help="输出天数，默认 3")
+    ap.add_argument("--past-days", type=int, default=0,
+                    help="额外向前回溯的天数（趋势分析用；需 Open-Meteo 数据源）")
     ap.add_argument("--water-type", "-w", default=None, help="水域类型，用于禁钓关键词预筛")
+    ap.add_argument("--source", "-s", default="auto", choices=["auto", "wttr", "open-meteo"],
+                    help="天气数据源：auto（默认，按日期自动选择）/ wttr / open-meteo")
     ap.add_argument("--no-network", action="store_true", help="跳过网络请求，仅输出天文/季节/法规预筛")
     ap.add_argument("--json", action="store_true", help="仅输出 JSON（默认也是 JSON，此参数保留兼容）")
     args = ap.parse_args(argv)
 
     try:
-        report = build_report(args.location, args.date, args.days, args.water_type, args.no_network)
+        report = build_report(args.location, args.date, args.days, args.water_type,
+                              args.no_network, args.source, args.past_days)
     except ValueError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 2
